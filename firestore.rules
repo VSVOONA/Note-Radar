@@ -1,0 +1,61 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: resources
+    // Fields:
+    //   - title: string (required, 1-100 chars)
+    //   - subject: string (required, 1-50 chars)
+    //   - topic: string (required, 1-50 chars)
+    //   - type: string (required, enum: PDF, PPT, Question Paper)
+    //   - file_url: string (required, valid URL)
+    //   - description: string (optional, 0-500 chars)
+    //   - rating: number (optional)
+    //   - uploaded_by: string (required, matches auth.uid)
+    //   - createdAt: timestamp (required)
+    //   - isExamMode: bool (optional)
+    //
+    // Collection: users
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required)
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional)
+    // ===============================================================
+
+    // Helper Functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isValidResource(data) {
+      return data.title is string && data.title.size() > 0 && data.title.size() <= 100 &&
+             data.subject is string && data.subject.size() > 0 && data.subject.size() <= 50 &&
+             data.topic is string && data.topic.size() > 0 && data.topic.size() <= 50 &&
+             data.type in ['PDF', 'PPT', 'Question Paper'] &&
+             data.file_url is string && data.file_url.matches("^https?://.*") &&
+             (!('description' in data) || (data.description is string && data.description.size() <= 500)) &&
+             data.uploaded_by == request.auth.uid;
+    }
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(userId);
+    }
+
+    match /resources/{resourceId} {
+      allow read: if true; // Resources are public for students
+      allow create: if isAuthenticated() && isValidResource(request.resource.data);
+      allow update: if isAuthenticated() && isOwner(resource.data.uploaded_by) && isValidResource(request.resource.data);
+      allow delete: if isAuthenticated() && isOwner(resource.data.uploaded_by);
+    }
+  }
+}

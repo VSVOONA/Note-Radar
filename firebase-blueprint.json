@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "Resource": {
+      "title": "Resource",
+      "description": "An academic resource like notes, PPTs, or past papers.",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string", "description": "The title of the resource" },
+        "subject": { "type": "string", "description": "The subject name" },
+        "topic": { "type": "string", "description": "The specific topic covered" },
+        "type": { "type": "string", "enum": ["PDF", "PPT", "Question Paper"], "description": "The file type" },
+        "file_url": { "type": "string", "format": "uri", "description": "URL to the hosted file" },
+        "description": { "type": "string", "description": "A brief description of the resource" },
+        "rating": { "type": "number", "description": "User rating of the resource" },
+        "uploaded_by": { "type": "string", "description": "UID of the user who uploaded it" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "When it was uploaded" },
+        "isExamMode": { "type": "boolean", "description": "Whether this is a high-priority exam resource" }
+      },
+      "required": ["title", "subject", "topic", "type", "file_url", "uploaded_by"]
+    },
+    "User": {
+      "title": "User",
+      "description": "A student user profile",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "displayName": { "type": "string" },
+        "email": { "type": "string" },
+        "photoURL": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    }
+  },
+  "firestore": {
+    "/resources": {
+      "schema": "Resource",
+      "description": "Collection of academic resources"
+    },
+    "/users": {
+      "schema": "User",
+      "description": "Collection of user profiles"
+    }
+  }
+}
