@@ -16,6 +16,10 @@ import {
   where,
   onSnapshot,
   addDoc,
+  updateDoc,
+  deleteDoc,
+  getDocs,
+  doc,
   serverTimestamp,
   orderBy,
   limit,
@@ -24,7 +28,7 @@ import {
 } from './firebase';
 import { User } from 'firebase/auth';
 import { Resource, ResourceType } from './types';
-import { Search, Upload, BookOpen, GraduationCap, LogIn, LogOut, FileText, Download, Eye, Sparkles, X, Menu, ChevronRight, AlertCircle, Loader2 } from 'lucide-react';
+import { Search, Upload, BookOpen, GraduationCap, LogIn, LogOut, FileText, Download, Eye, Sparkles, X, Menu, ChevronRight, AlertCircle, Loader2, RefreshCcw } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { explainTopic } from './services/geminiService';
 import ReactMarkdown from 'react-markdown';
@@ -38,7 +42,7 @@ function cn(...inputs: ClassValue[]) {
 
 // --- Components ---
 
-const Navbar = ({ user, onLogin, onLogout, onNavigate, currentPage }: any) => (
+const Navbar = ({ user, onLogin, onLogout, onNavigate, currentPage, isAuthenticating }: any) => (
   <nav className="sticky top-0 z-50 bg-white/80 backdrop-blur-md border-b border-zinc-200 px-6 py-4">
     <div className="max-w-7xl mx-auto flex items-center justify-between">
       <div 
@@ -83,10 +87,15 @@ const Navbar = ({ user, onLogin, onLogout, onNavigate, currentPage }: any) => (
         ) : (
           <button 
             onClick={onLogin}
-            className="flex items-center gap-2 bg-zinc-900 text-white px-4 py-2 rounded-full text-sm font-medium hover:bg-zinc-800 transition-all"
+            disabled={isAuthenticating}
+            className="flex items-center gap-2 bg-zinc-900 text-white px-4 py-2 rounded-full text-sm font-medium hover:bg-zinc-800 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            <LogIn className="w-4 h-4" />
-            Sign In
+            {isAuthenticating ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <LogIn className="w-4 h-4" />
+            )}
+            {isAuthenticating ? 'Signing In...' : 'Sign In'}
           </button>
         )}
       </div>
@@ -164,6 +173,81 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [aiExplanation, setAiExplanation] = useState<string | null>(null);
   const [explaining, setExplaining] = useState(false);
+  const [fixing, setFixing] = useState(false);
+  const [isAuthenticating, setIsAuthenticating] = useState(false);
+  const [dbStatus, setDbStatus] = useState<'checking' | 'connected' | 'error' | 'empty'>('checking');
+  const [maintenanceReport, setMaintenanceReport] = useState<{
+    scanned: number;
+    corrected: number;
+    examples: string[];
+    cleared?: number;
+  } | null>(null);
+
+  const clearAllResources = async () => {
+    if (!user || !window.confirm("Are you sure you want to delete ALL resources you've uploaded? This cannot be undone.")) return;
+    setFixing(true);
+    const path = 'resources';
+    let cleared = 0;
+    try {
+      const snapshot = await getDocs(collection(db, path));
+      for (const docSnap of snapshot.docs) {
+        const data = docSnap.data() as Resource;
+        if (data.uploaded_by === user.uid) {
+          await deleteDoc(doc(db, path, docSnap.id));
+          cleared++;
+        }
+      }
+      setMaintenanceReport({ scanned: snapshot.size, corrected: 0, examples: [], cleared });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, path);
+    } finally {
+      setFixing(false);
+    }
+  };
+
+  const fixResourceTypes = async () => {
+    if (!user) return;
+    setFixing(true);
+    const path = 'resources';
+    let scanned = 0;
+    let corrected = 0;
+    const examples: string[] = [];
+
+    try {
+      const snapshot = await getDocs(collection(db, path));
+      scanned = snapshot.size;
+
+      for (const docSnap of snapshot.docs) {
+        const data = docSnap.data() as Resource;
+        const fileUrl = data.file_url.toLowerCase();
+        let newType: ResourceType = data.type;
+
+        if (fileUrl.endsWith('.pdf')) {
+          newType = 'PDF';
+        } else if (fileUrl.endsWith('.ppt') || fileUrl.endsWith('.pptx')) {
+          newType = 'PPT';
+        } else if (fileUrl.includes('question')) {
+          newType = 'Question Paper';
+        }
+
+        if (newType !== data.type) {
+          // Only update if current user is the owner (due to security rules)
+          if (data.uploaded_by === user.uid) {
+            await updateDoc(doc(db, path, docSnap.id), { type: newType });
+            corrected++;
+            if (examples.length < 3) {
+              examples.push(`${data.title}: ${data.type} -> ${newType}`);
+            }
+          }
+        }
+      }
+      setMaintenanceReport({ scanned, corrected, examples });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    } finally {
+      setFixing(false);
+    }
+  };
 
   // Auth Listener
   useEffect(() => {
@@ -177,11 +261,14 @@ export default function App() {
   // Data Listener
   useEffect(() => {
     const path = 'resources';
-    // Remove orderBy from query to ensure documents with missing createdAt still show up
     const q = query(collection(db, path));
     const unsubscribe = onSnapshot(q, (snapshot) => {
+      if (snapshot.empty) {
+        setDbStatus('empty');
+      } else {
+        setDbStatus('connected');
+      }
       const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Resource));
-      // Sort in memory instead
       const sortedDocs = docs.sort((a, b) => {
         const timeA = a.createdAt?.seconds || 0;
         const timeB = b.createdAt?.seconds || 0;
@@ -191,6 +278,7 @@ export default function App() {
       setLoading(false);
     }, (error) => {
       console.error("Firestore error:", error);
+      setDbStatus('error');
       handleFirestoreError(error, OperationType.LIST, path);
       setLoading(false);
     });
@@ -241,6 +329,9 @@ export default function App() {
   const [authError, setAuthError] = useState<string | null>(null);
 
   const handleLogin = async () => {
+    if (isAuthenticating) return;
+    
+    setIsAuthenticating(true);
     setAuthError(null);
     try {
       await signInWithPopup(auth, googleProvider);
@@ -249,10 +340,16 @@ export default function App() {
       if (error.code === 'auth/popup-blocked') {
         setAuthError("Popup blocked! Please allow popups for this site in your browser settings and try again.");
       } else if (error.code === 'auth/cancelled-popup-request') {
-        setAuthError("Login was cancelled. Please try again.");
+        // This usually happens when the user clicks login twice or closes the popup quickly
+        // We don't necessarily need to show a scary error, just reset the state
+        console.log("Login request was cancelled or superseded.");
+      } else if (error.code === 'auth/popup-closed-by-user') {
+        setAuthError("Login window was closed before completion. Please try again.");
       } else {
         setAuthError("An error occurred during login. Please try again.");
       }
+    } finally {
+      setIsAuthenticating(false);
     }
   };
 
@@ -296,6 +393,7 @@ export default function App() {
         onLogout={handleLogout} 
         onNavigate={setCurrentPage}
         currentPage={currentPage}
+        isAuthenticating={isAuthenticating}
       />
 
       <AnimatePresence>
@@ -334,8 +432,52 @@ export default function App() {
                 Find the right notes in seconds.
               </div>
               <h1 className="text-6xl font-extrabold tracking-tight mb-6 text-zinc-900 leading-tight">
-                Find the best notes for <span className="text-indigo-600">any topic.</span>
+                {user ? `Welcome back, ${user.displayName?.split(' ')[0]}!` : 'Find the best notes for'} <span className="text-indigo-600">{user ? 'Ready to study?' : 'any topic.'}</span>
               </h1>
+
+              {dbStatus === 'empty' && (
+                <div className="w-full mb-12 p-6 bg-amber-50 border border-amber-200 rounded-3xl text-amber-800 flex flex-col items-center gap-4">
+                  <div className="flex items-center gap-2 font-bold">
+                    <AlertCircle className="w-5 h-5" />
+                    Database is currently empty
+                  </div>
+                  <p className="text-sm">It looks like all resources have been cleared. Would you like to restore the sample academic data?</p>
+                  <button 
+                    onClick={async () => {
+                      if (!user) {
+                        handleLogin();
+                        return;
+                      }
+                      setFixing(true);
+                      const samples = [
+                        { title: "Java OOPs Concepts", subject: "Object Oriented Programming", topic: "OOPs Concepts", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comprehensive guide to Inheritance, Polymorphism, Encapsulation, and Abstraction in Java.", isExamMode: true },
+                        { title: "Binary Trees Notes", subject: "Data Structures", topic: "Trees", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Lecture notes explaining binary trees and traversal methods.", isExamMode: true },
+                        { title: "Graph Algorithms Overview", subject: "Data Structures", topic: "Graphs", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Slides covering BFS, DFS, and Dijkstra's algorithm.", isExamMode: true },
+                        { title: "Deadlock Prevention & Avoidance", subject: "Operating Systems", topic: "Deadlock", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Detailed guide on Banker's algorithm and resource allocation graphs.", isExamMode: true },
+                        { title: "CPU Scheduling Algorithms", subject: "Operating Systems", topic: "CPU Scheduling", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comparison of FCFS, SJF, and Round Robin scheduling.", isExamMode: true },
+                        { title: "Database Normalization Guide", subject: "Database Management Systems", topic: "Normalization", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Step-by-step 1NF, 2NF, 3NF and BCNF normalization.", isExamMode: true },
+                        { title: "OSI 7 Layers Overview", subject: "Computer Networks", topic: "OSI Model", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Visual guide to the OSI reference model layers.", isExamMode: true },
+                        { title: "Sorting Algorithms Comparison", subject: "Data Structures", topic: "Sorting", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Time complexity analysis of QuickSort, MergeSort, and HeapSort.", isExamMode: true }
+                      ];
+                      const path = 'resources';
+                      try {
+                        for (const s of samples) {
+                          await addDoc(collection(db, path), { ...s, uploaded_by: user.uid, createdAt: serverTimestamp(), rating: 5 });
+                        }
+                        setDbStatus('connected');
+                      } catch (error) {
+                        handleFirestoreError(error, OperationType.CREATE, path);
+                      } finally {
+                        setFixing(false);
+                      }
+                    }}
+                    disabled={fixing}
+                    className="bg-amber-600 text-white px-6 py-2 rounded-xl font-bold hover:bg-amber-700 transition-all disabled:opacity-50"
+                  >
+                    {fixing ? "Restoring..." : "Restore Sample Data"}
+                  </button>
+                </div>
+              )}
               <p className="text-xl text-zinc-500 mb-12 max-w-2xl">
                 NoteRadar helps you discover PDF notes, PPTs, and past papers instantly. Just type your subject and topic.
               </p>
@@ -356,7 +498,7 @@ export default function App() {
                 </button>
               </form>
 
-              <div className="flex items-center gap-4">
+              <div className="flex items-center gap-4 mb-16">
                 <button 
                   onClick={toggleExamMode}
                   className={cn(
@@ -379,6 +521,28 @@ export default function App() {
                   Browse All
                 </button>
               </div>
+
+              {resources.length > 0 && (
+                <div className="w-full mt-12">
+                  <div className="flex items-center justify-between mb-6">
+                    <h3 className="text-xl font-bold text-zinc-900">Recently Added</h3>
+                    <button 
+                      onClick={() => {
+                        setSearchQuery('');
+                        handleSearch();
+                      }}
+                      className="text-sm text-indigo-600 font-semibold hover:underline"
+                    >
+                      View All
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6 text-left">
+                    {resources.slice(0, 3).map(r => (
+                      <ResourceCard key={r.id} resource={r} onView={handleViewResource} />
+                    ))}
+                  </div>
+                </div>
+              )}
             </motion.div>
           )}
 
@@ -703,53 +867,103 @@ export default function App() {
                   <p className="text-zinc-500 mb-8">You need to be logged in to contribute resources to NoteRadar.</p>
                   <button 
                     onClick={handleLogin}
-                    className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all inline-flex items-center gap-2"
+                    disabled={isAuthenticating}
+                    className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all inline-flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    <LogIn className="w-5 h-5" /> Sign In with Google
+                    {isAuthenticating ? (
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                    ) : (
+                      <LogIn className="w-5 h-5" />
+                    )}
+                    {isAuthenticating ? 'Signing In...' : 'Sign In with Google'}
                   </button>
                 </div>
               ) : (
                 <div className="space-y-8">
                   <UploadForm onComplete={() => setCurrentPage('home')} user={user} />
                   
-                  <div className="bg-zinc-100 p-6 rounded-3xl border border-zinc-200 text-center">
-                    <h4 className="font-bold mb-2">Demo Mode</h4>
-                    <p className="text-xs text-zinc-500 mb-4">Quickly populate the database with sample academic resources.</p>
-                    <button 
-                      onClick={async () => {
-                        const samples = [
-                          { title: "Java OOPs Concepts", subject: "Object Oriented Programming", topic: "OOPs Concepts", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comprehensive guide to Inheritance, Polymorphism, Encapsulation, and Abstraction in Java.", isExamMode: true },
-                          { title: "Binary Trees Notes", subject: "Data Structures", topic: "Trees", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Lecture notes explaining binary trees and traversal methods.", isExamMode: true },
-                          { title: "Graph Algorithms Overview", subject: "Data Structures", topic: "Graphs", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Slides covering BFS, DFS, and Dijkstra's algorithm.", isExamMode: true },
-                          { title: "Deadlock Prevention & Avoidance", subject: "Operating Systems", topic: "Deadlock", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Detailed guide on Banker's algorithm and resource allocation graphs.", isExamMode: true },
-                          { title: "CPU Scheduling Algorithms", subject: "Operating Systems", topic: "CPU Scheduling", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comparison of FCFS, SJF, and Round Robin scheduling.", isExamMode: true },
-                          { title: "Distance Vector Routing", subject: "Computer Networks", topic: "Routing Algorithms", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Explanation of RIP and Bellman-Ford algorithm.", isExamMode: false },
-                          { title: "Database Normalization Guide", subject: "Database Management Systems", topic: "Normalization", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Step-by-step 1NF, 2NF, 3NF and BCNF normalization.", isExamMode: true },
-                          { title: "OSI 7 Layers Overview", subject: "Computer Networks", topic: "OSI Model", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Visual guide to the OSI reference model layers.", isExamMode: true },
-                          { title: "TCP vs UDP Comparison", subject: "Computer Networks", topic: "TCP vs UDP", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Analysis of connection-oriented vs connectionless protocols.", isExamMode: false },
-                          { title: "Agile Development Lifecycle", subject: "Software Engineering", topic: "Agile", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Introduction to Scrum, Sprints, and Kanban.", isExamMode: true },
-                          { title: "Stack Implementation & Apps", subject: "Data Structures", topic: "Stacks", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Using stacks for expression evaluation and recursion.", isExamMode: false },
-                          { title: "Paging and Segmentation", subject: "Operating Systems", topic: "Memory Management", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Virtual memory concepts and page table structures.", isExamMode: true },
-                          { title: "Entity Relationship Modeling", subject: "Database Management Systems", topic: "ER Diagrams", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Designing database schemas using ER diagrams.", isExamMode: true },
-                          { title: "Software Testing Techniques", subject: "Software Engineering", topic: "Testing", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Black-box vs White-box testing strategies.", isExamMode: false },
-                          { title: "IPv4 vs IPv6 Addressing", subject: "Computer Networks", topic: "IP Addressing", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comparison of network addressing formats and headers.", isExamMode: false },
-                          { title: "Sorting Algorithms Comparison", subject: "Data Structures", topic: "Sorting", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Time complexity analysis of QuickSort, MergeSort, and HeapSort.", isExamMode: true }
-                        ];
-                        const path = 'resources';
-                        try {
-                          for (const s of samples) {
-                            await addDoc(collection(db, path), { ...s, uploaded_by: user.uid, createdAt: serverTimestamp(), rating: 5 });
+                  <div className="bg-zinc-100 p-6 rounded-3xl border border-zinc-200 text-center space-y-6">
+                    <div>
+                      <h4 className="font-bold mb-2">Demo Mode</h4>
+                      <p className="text-xs text-zinc-500 mb-4">Quickly populate the database with sample academic resources.</p>
+                      <button 
+                        onClick={async () => {
+                          const samples = [
+                            { title: "Java OOPs Concepts", subject: "Object Oriented Programming", topic: "OOPs Concepts", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comprehensive guide to Inheritance, Polymorphism, Encapsulation, and Abstraction in Java.", isExamMode: true },
+                            { title: "Binary Trees Notes", subject: "Data Structures", topic: "Trees", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Lecture notes explaining binary trees and traversal methods.", isExamMode: true },
+                            { title: "Graph Algorithms Overview", subject: "Data Structures", topic: "Graphs", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Slides covering BFS, DFS, and Dijkstra's algorithm.", isExamMode: true },
+                            { title: "Deadlock Prevention & Avoidance", subject: "Operating Systems", topic: "Deadlock", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Detailed guide on Banker's algorithm and resource allocation graphs.", isExamMode: true },
+                            { title: "CPU Scheduling Algorithms", subject: "Operating Systems", topic: "CPU Scheduling", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comparison of FCFS, SJF, and Round Robin scheduling.", isExamMode: true },
+                            { title: "Distance Vector Routing", subject: "Computer Networks", topic: "Routing Algorithms", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Explanation of RIP and Bellman-Ford algorithm.", isExamMode: false },
+                            { title: "Database Normalization Guide", subject: "Database Management Systems", topic: "Normalization", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Step-by-step 1NF, 2NF, 3NF and BCNF normalization.", isExamMode: true },
+                            { title: "OSI 7 Layers Overview", subject: "Computer Networks", topic: "OSI Model", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Visual guide to the OSI reference model layers.", isExamMode: true },
+                            { title: "TCP vs UDP Comparison", subject: "Computer Networks", topic: "TCP vs UDP", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Analysis of connection-oriented vs connectionless protocols.", isExamMode: false },
+                            { title: "Agile Development Lifecycle", subject: "Software Engineering", topic: "Agile", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Introduction to Scrum, Sprints, and Kanban.", isExamMode: true },
+                            { title: "Stack Implementation & Apps", subject: "Data Structures", topic: "Stacks", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Using stacks for expression evaluation and recursion.", isExamMode: false },
+                            { title: "Paging and Segmentation", subject: "Operating Systems", topic: "Memory Management", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Virtual memory concepts and page table structures.", isExamMode: true },
+                            { title: "Entity Relationship Modeling", subject: "Database Management Systems", topic: "ER Diagrams", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Designing database schemas using ER diagrams.", isExamMode: true },
+                            { title: "Software Testing Techniques", subject: "Software Engineering", topic: "Testing", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Black-box vs White-box testing strategies.", isExamMode: false },
+                            { title: "IPv4 vs IPv6 Addressing", subject: "Computer Networks", topic: "IP Addressing", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comparison of network addressing formats and headers.", isExamMode: false },
+                            { title: "Sorting Algorithms Comparison", subject: "Data Structures", topic: "Sorting", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Time complexity analysis of QuickSort, MergeSort, and HeapSort.", isExamMode: true }
+                          ];
+                          const path = 'resources';
+                          try {
+                            for (const s of samples) {
+                              await addDoc(collection(db, path), { ...s, uploaded_by: user.uid, createdAt: serverTimestamp(), rating: 5 });
+                            }
+                            alert("Sample data seeded!");
+                            setCurrentPage('home');
+                          } catch (error) {
+                            handleFirestoreError(error, OperationType.CREATE, path);
                           }
-                          alert("Sample data seeded!");
-                          setCurrentPage('home');
-                        } catch (error) {
-                          handleFirestoreError(error, OperationType.CREATE, path);
-                        }
-                      }}
-                      className="text-xs font-bold text-indigo-600 hover:text-indigo-700"
-                    >
-                      Seed Sample Data
-                    </button>
+                        }}
+                        className="text-xs font-bold text-indigo-600 hover:text-indigo-700"
+                      >
+                        Seed Sample Data
+                      </button>
+                    </div>
+
+                    <div className="pt-6 border-t border-zinc-200">
+                      <h4 className="font-bold mb-2">Maintenance Mode</h4>
+                      <p className="text-xs text-zinc-500 mb-4">Correct resource types based on file extensions.</p>
+                      <div className="flex items-center justify-center gap-4">
+                        <button 
+                          onClick={fixResourceTypes}
+                          disabled={fixing}
+                          className="text-xs font-bold text-amber-600 hover:text-amber-700 disabled:opacity-50"
+                        >
+                          {fixing ? "Fixing..." : "Fix Resource Types"}
+                        </button>
+                        <button 
+                          onClick={clearAllResources}
+                          disabled={fixing}
+                          className="text-xs font-bold text-red-600 hover:text-red-700 disabled:opacity-50"
+                        >
+                          {fixing ? "Working..." : "Clear My Data"}
+                        </button>
+                      </div>
+
+                      {maintenanceReport && (
+                        <div className="mt-4 p-4 bg-white rounded-xl border border-zinc-200 text-left">
+                          <p className="text-xs font-bold text-zinc-900 mb-1">Report:</p>
+                          <ul className="text-[10px] text-zinc-600 space-y-1">
+                            <li>• Scanned: {maintenanceReport.scanned}</li>
+                            <li>• Corrected: {maintenanceReport.corrected}</li>
+                            {maintenanceReport.cleared !== undefined && (
+                              <li>• Cleared: {maintenanceReport.cleared}</li>
+                            )}
+                            {maintenanceReport.examples.length > 0 && (
+                              <li className="pt-1">
+                                <p className="font-bold">Examples:</p>
+                                {maintenanceReport.examples.map((ex, i) => (
+                                  <p key={i}>- {ex}</p>
+                                ))}
+                              </li>
+                            )}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -757,6 +971,37 @@ export default function App() {
           )}
         </AnimatePresence>
       </main>
+
+      <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-zinc-200">
+        <div className="flex flex-col md:flex-row justify-between items-center gap-6">
+          <div className="flex items-center gap-2 opacity-50">
+            <GraduationCap className="w-5 h-5" />
+            <span className="text-sm font-bold">NoteRadar</span>
+          </div>
+          <div className="flex items-center gap-6">
+            <div className="flex items-center gap-2 px-3 py-1 bg-zinc-100 rounded-full border border-zinc-200">
+              <div className={cn(
+                "w-2 h-2 rounded-full", 
+                dbStatus === 'connected' ? "bg-emerald-500" : 
+                dbStatus === 'empty' ? "bg-amber-500" : 
+                dbStatus === 'error' ? "bg-red-500" : "bg-zinc-300"
+              )} />
+              <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-wider">
+                {dbStatus === 'connected' ? `${resources.length} Resources Online` : 
+                 dbStatus === 'empty' ? "Database Empty" : 
+                 dbStatus === 'error' ? "Connection Error" : "Checking Connection..."}
+              </span>
+            </div>
+            <button 
+              onClick={() => window.location.reload()}
+              className="p-2 hover:bg-zinc-100 rounded-lg transition-colors text-zinc-400 hover:text-zinc-600"
+              title="Refresh Connection"
+            >
+              <RefreshCcw className="w-4 h-4" />
+            </button>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
