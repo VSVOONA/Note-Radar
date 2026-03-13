@@ -59,6 +59,12 @@ const Navbar = ({ user, onLogin, onLogout, onNavigate, currentPage }: any) => (
           Search
         </button>
         <button 
+          onClick={() => onNavigate('exam')}
+          className={cn("text-sm font-medium transition-colors", currentPage === 'exam' ? "text-indigo-600" : "text-zinc-500 hover:text-zinc-900")}
+        >
+          Exam Mode
+        </button>
+        <button 
           onClick={() => onNavigate('upload')}
           className={cn("text-sm font-medium transition-colors", currentPage === 'upload' ? "text-indigo-600" : "text-zinc-500 hover:text-zinc-900")}
         >
@@ -103,11 +109,19 @@ const ResourceCard = ({ resource, onView }: { resource: Resource, onView: (r: Re
       )}>
         {resource.type}
       </div>
-      {resource.isExamMode && (
-        <div className="bg-amber-100 text-amber-700 px-2 py-1 rounded-md flex items-center gap-1 text-[10px] font-bold">
-          <Sparkles className="w-3 h-3" /> EXAM MODE
-        </div>
-      )}
+      <div className="flex items-center gap-1">
+        {resource.rating && resource.rating > 0 && (
+          <div className="flex items-center gap-1 text-amber-500 text-xs font-bold mr-2">
+            <Sparkles className="w-3 h-3 fill-amber-500" />
+            {resource.rating.toFixed(1)}
+          </div>
+        )}
+        {resource.isExamMode && (
+          <div className="bg-amber-100 text-amber-700 px-2 py-1 rounded-md flex items-center gap-1 text-[10px] font-bold">
+            <Sparkles className="w-3 h-3" /> EXAM
+          </div>
+        )}
+      </div>
     </div>
     
     <h3 className="text-lg font-semibold text-zinc-900 mb-1 group-hover:text-indigo-600 transition-colors">
@@ -141,7 +155,7 @@ const ResourceCard = ({ resource, onView }: { resource: Resource, onView: (r: Re
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [currentPage, setCurrentPage] = useState<'home' | 'results' | 'upload' | 'viewer'>('home');
+  const [currentPage, setCurrentPage] = useState<'home' | 'results' | 'upload' | 'viewer' | 'exam'>('home');
   const [searchQuery, setSearchQuery] = useState('');
   const [resources, setResources] = useState<Resource[]>([]);
   const [filteredResources, setFilteredResources] = useState<Resource[]>([]);
@@ -163,12 +177,22 @@ export default function App() {
   // Data Listener
   useEffect(() => {
     const path = 'resources';
-    const q = query(collection(db, path), orderBy('createdAt', 'desc'));
+    // Remove orderBy from query to ensure documents with missing createdAt still show up
+    const q = query(collection(db, path));
     const unsubscribe = onSnapshot(q, (snapshot) => {
       const docs = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Resource));
-      setResources(docs);
+      // Sort in memory instead
+      const sortedDocs = docs.sort((a, b) => {
+        const timeA = a.createdAt?.seconds || 0;
+        const timeB = b.createdAt?.seconds || 0;
+        return timeB - timeA;
+      });
+      setResources(sortedDocs);
+      setLoading(false);
     }, (error) => {
+      console.error("Firestore error:", error);
       handleFirestoreError(error, OperationType.LIST, path);
+      setLoading(false);
     });
     return () => unsubscribe();
   }, []);
@@ -176,13 +200,19 @@ export default function App() {
   // Search Logic
   const handleSearch = (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    const queryLower = searchQuery.toLowerCase();
-    const filtered = resources.filter(r => 
-      (r.subject.toLowerCase().includes(queryLower) || 
-       r.topic.toLowerCase().includes(queryLower) || 
-       r.title.toLowerCase().includes(queryLower)) &&
-      (!isExamMode || r.isExamMode)
-    );
+    const queryLower = searchQuery.toLowerCase().trim();
+    
+    const filtered = resources.filter(r => {
+      const matchesSearch = !queryLower || 
+        (r.subject?.toLowerCase() || '').includes(queryLower) || 
+        (r.topic?.toLowerCase() || '').includes(queryLower) || 
+        (r.title?.toLowerCase() || '').includes(queryLower);
+      
+      const matchesExamMode = !isExamMode || r.isExamMode === true;
+      
+      return matchesSearch && matchesExamMode;
+    });
+    
     setFilteredResources(filtered);
     setCurrentPage('results');
   };
@@ -190,12 +220,20 @@ export default function App() {
   const toggleExamMode = () => {
     const nextMode = !isExamMode;
     setIsExamMode(nextMode);
+    
+    // If we are on results page, update the filter immediately
     if (currentPage === 'results') {
-      const filtered = resources.filter(r => 
-        (r.subject.toLowerCase().includes(searchQuery.toLowerCase()) || 
-         r.topic.toLowerCase().includes(searchQuery.toLowerCase())) &&
-        (!nextMode || r.isExamMode)
-      );
+      const queryLower = searchQuery.toLowerCase().trim();
+      const filtered = resources.filter(r => {
+        const matchesSearch = !queryLower || 
+          (r.subject?.toLowerCase() || '').includes(queryLower) || 
+          (r.topic?.toLowerCase() || '').includes(queryLower) || 
+          (r.title?.toLowerCase() || '').includes(queryLower);
+        
+        const matchesExamMode = !nextMode || r.isExamMode === true;
+        
+        return matchesSearch && matchesExamMode;
+      });
       setFilteredResources(filtered);
     }
   };
@@ -220,10 +258,18 @@ export default function App() {
 
   const handleLogout = () => signOut(auth);
 
-  const handleViewResource = (resource: Resource) => {
+  const handleViewResource = async (resource: Resource) => {
     setSelectedResource(resource);
     setAiExplanation(null);
     setCurrentPage('viewer');
+    
+    // Automatically trigger AI explanation for PPTs since they can't be viewed in-browser
+    if (resource.type === 'PPT') {
+      setExplaining(true);
+      const explanation = await explainTopic(resource.topic, resource.subject);
+      setAiExplanation(explanation);
+      setExplaining(false);
+    }
   };
 
   const handleExplain = async () => {
@@ -285,7 +331,7 @@ export default function App() {
             >
               <div className="mb-8 inline-flex items-center gap-2 bg-indigo-50 text-indigo-700 px-4 py-2 rounded-full text-sm font-semibold">
                 <Sparkles className="w-4 h-4" />
-                Smart Academic Resource Finder
+                Find the right notes in seconds.
               </div>
               <h1 className="text-6xl font-extrabold tracking-tight mb-6 text-zinc-900 leading-tight">
                 Find the best notes for <span className="text-indigo-600">any topic.</span>
@@ -322,6 +368,15 @@ export default function App() {
                 >
                   <Sparkles className={cn("w-5 h-5", isExamMode ? "fill-amber-500" : "")} />
                   Exam Mode {isExamMode ? 'ON' : 'OFF'}
+                </button>
+                <button 
+                  onClick={() => {
+                    setSearchQuery('');
+                    handleSearch();
+                  }}
+                  className="px-6 py-3 bg-zinc-200 text-zinc-700 rounded-xl font-bold hover:bg-zinc-300 transition-all"
+                >
+                  Browse All
                 </button>
               </div>
             </motion.div>
@@ -422,18 +477,48 @@ export default function App() {
                         title="PDF Viewer"
                       />
                     ) : (
-                      <div className="text-center p-12">
-                        <div className="bg-white p-8 rounded-3xl shadow-sm inline-block mb-6">
-                          <FileText className="w-16 h-16 text-indigo-600 mx-auto" />
+                      <div className="w-full h-full overflow-y-auto p-8 bg-white">
+                        <div className="max-w-3xl mx-auto">
+                          <div className="flex items-center justify-between mb-8 pb-6 border-b border-zinc-100">
+                            <div className="flex items-center gap-4">
+                              <div className="bg-indigo-50 p-3 rounded-2xl">
+                                <FileText className="w-8 h-8 text-indigo-600" />
+                              </div>
+                              <div>
+                                <h3 className="text-2xl font-bold text-zinc-900">PPT Resource</h3>
+                                <p className="text-zinc-500">Topic: {selectedResource.topic}</p>
+                              </div>
+                            </div>
+                            <a 
+                              href={selectedResource.file_url} 
+                              download
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="bg-indigo-600 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all flex items-center gap-2 shadow-lg shadow-indigo-500/20"
+                            >
+                              <Download className="w-5 h-5" /> Download PPT
+                            </a>
+                          </div>
+
+                          {explaining ? (
+                            <div className="py-20 text-center">
+                              <Loader2 className="w-10 h-10 text-indigo-600 animate-spin mx-auto mb-4" />
+                              <p className="text-zinc-500 font-medium">AI is generating content for {selectedResource.topic}...</p>
+                            </div>
+                          ) : aiExplanation ? (
+                            <div className="prose prose-indigo prose-lg max-w-none">
+                              <div className="bg-indigo-50/50 p-4 rounded-xl mb-6 flex items-center gap-2 text-indigo-700 font-bold text-sm uppercase tracking-wider">
+                                <Sparkles className="w-4 h-4" /> AI Generated Content Preview
+                              </div>
+                              <ReactMarkdown>{aiExplanation}</ReactMarkdown>
+                            </div>
+                          ) : (
+                            <div className="py-20 text-center bg-zinc-50 rounded-3xl border-2 border-dashed border-zinc-200">
+                              <FileText className="w-12 h-12 text-zinc-300 mx-auto mb-4" />
+                              <p className="text-zinc-500">No preview available. Please download the PPT to view.</p>
+                            </div>
+                          )}
                         </div>
-                        <h3 className="text-2xl font-bold mb-2">PPT Resource</h3>
-                        <p className="text-zinc-500 mb-8">This resource is a PPT file. You can download it to view locally.</p>
-                        <a 
-                          href={selectedResource.file_url} 
-                          className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all inline-flex items-center gap-2"
-                        >
-                          <Download className="w-5 h-5" /> Download PPT
-                        </a>
                       </div>
                     )}
                   </div>
@@ -494,6 +579,110 @@ export default function App() {
             </motion.div>
           )}
 
+          {currentPage === 'exam' && (
+            <motion.div 
+              key="exam"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -20 }}
+              className="space-y-12"
+            >
+              <div className="text-center max-w-2xl mx-auto mb-12">
+                <div className="inline-flex items-center gap-2 bg-amber-50 text-amber-700 px-4 py-2 rounded-full text-sm font-bold mb-4">
+                  <Sparkles className="w-4 h-4" />
+                  Exam Mode – Quick Revision Resources
+                </div>
+                <h2 className="text-4xl font-bold text-zinc-900 mb-4">Master Your Exams</h2>
+                <p className="text-zinc-500">Curated high-priority notes, top-rated resources, and past papers to help you ace your finals.</p>
+              </div>
+
+              <div className="space-y-8">
+                <section>
+                  <div className="flex items-center gap-2 mb-6">
+                    <div className="bg-indigo-600 p-1.5 rounded-lg">
+                      <Sparkles className="text-white w-4 h-4" />
+                    </div>
+                    <h3 className="text-xl font-bold text-zinc-900">Top Rated Resources</h3>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {resources
+                      .filter(r => r.isExamMode === true)
+                      .sort((a, b) => (b.rating || 0) - (a.rating || 0))
+                      .slice(0, 6)
+                      .map(r => (
+                        <ResourceCard key={r.id} resource={r} onView={handleViewResource} />
+                      ))}
+                    {resources.filter(r => r.isExamMode === true).length === 0 && (
+                      <div className="col-span-full py-12 text-center bg-white rounded-2xl border border-dashed border-zinc-200">
+                        <p className="text-zinc-400">No top rated exam resources yet.</p>
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                <section>
+                  <div className="flex items-center gap-2 mb-6">
+                    <div className="bg-amber-600 p-1.5 rounded-lg">
+                      <FileText className="text-white w-4 h-4" />
+                    </div>
+                    <h3 className="text-xl font-bold text-zinc-900">Past Question Papers</h3>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {resources
+                      .filter(r => r.type === 'Question Paper')
+                      .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+                      .slice(0, 6)
+                      .map(r => (
+                        <ResourceCard key={r.id} resource={r} onView={handleViewResource} />
+                      ))}
+                    {resources.filter(r => r.type === 'Question Paper').length === 0 && (
+                      <div className="col-span-full py-12 text-center bg-white rounded-2xl border border-dashed border-zinc-200">
+                        <p className="text-zinc-400">No question papers uploaded yet.</p>
+                      </div>
+                    )}
+                  </div>
+                </section>
+
+                <section>
+                  <div className="flex items-center gap-2 mb-6">
+                    <div className="bg-emerald-600 p-1.5 rounded-lg">
+                      <BookOpen className="text-white w-4 h-4" />
+                    </div>
+                    <h3 className="text-xl font-bold text-zinc-900">Important Notes</h3>
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {resources
+                      .filter(r => r.isExamMode === true && r.type !== 'Question Paper')
+                      .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0))
+                      .slice(0, 6)
+                      .map(r => (
+                        <ResourceCard key={r.id} resource={r} onView={handleViewResource} />
+                      ))}
+                    {resources.filter(r => r.isExamMode === true && r.type !== 'Question Paper').length === 0 && (
+                      <div className="col-span-full py-12 text-center bg-white rounded-2xl border border-dashed border-zinc-200">
+                        <p className="text-zinc-400">No important notes found.</p>
+                      </div>
+                    )}
+                  </div>
+                </section>
+              </div>
+
+              {resources.length === 0 && (
+                <div className="bg-white p-12 rounded-3xl border border-zinc-200 text-center">
+                  <BookOpen className="w-12 h-12 text-zinc-200 mx-auto mb-4" />
+                  <h3 className="text-xl font-bold mb-2">No Content Available</h3>
+                  <p className="text-zinc-500 mb-6">It looks like the database is empty. You can add some sample data from the Upload page.</p>
+                  <button 
+                    onClick={() => setCurrentPage('upload')}
+                    className="bg-indigo-600 text-white px-8 py-3 rounded-xl font-bold hover:bg-indigo-700 transition-all"
+                  >
+                    Go to Upload
+                  </button>
+                </div>
+              )}
+            </motion.div>
+          )}
+
           {currentPage === 'upload' && (
             <motion.div 
               key="upload"
@@ -529,10 +718,22 @@ export default function App() {
                     <button 
                       onClick={async () => {
                         const samples = [
-                          { title: "Data Structures - Trees & Graphs", subject: "Data Structures", topic: "Trees", type: "PDF", file_url: "https://www.tutorialspoint.com/data_structures_algorithms/data_structures_algorithms_tutorial.pdf", description: "Comprehensive notes on tree traversal and graph algorithms.", isExamMode: true },
-                          { title: "Operating Systems - Process Management", subject: "Operating Systems", topic: "Deadlock", type: "PDF", file_url: "https://www.cl.cam.ac.uk/teaching/1011/OpSystems/os-notes.pdf", description: "Detailed explanation of deadlock prevention and avoidance.", isExamMode: true },
-                          { title: "Computer Networks - Routing Protocols", subject: "Computer Networks", topic: "Routing", type: "PDF", file_url: "https://www.net.t-labs.tu-berlin.de/teaching/ss06/cn1/materials/cn1-routing.pdf", description: "Overview of RIP, OSPF and BGP protocols.", isExamMode: false },
-                          { title: "Database Systems - Normalization", subject: "DBMS", topic: "Normalization", type: "PDF", file_url: "https://www.cs.uct.ac.za/mit_notes/database/pdfs/Normalization.pdf", description: "1NF, 2NF, 3NF and BCNF explained with examples.", isExamMode: true }
+                          { title: "Java OOPs Concepts", subject: "Object Oriented Programming", topic: "OOPs Concepts", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comprehensive guide to Inheritance, Polymorphism, Encapsulation, and Abstraction in Java.", isExamMode: true },
+                          { title: "Binary Trees Notes", subject: "Data Structures", topic: "Trees", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Lecture notes explaining binary trees and traversal methods.", isExamMode: true },
+                          { title: "Graph Algorithms Overview", subject: "Data Structures", topic: "Graphs", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Slides covering BFS, DFS, and Dijkstra's algorithm.", isExamMode: true },
+                          { title: "Deadlock Prevention & Avoidance", subject: "Operating Systems", topic: "Deadlock", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Detailed guide on Banker's algorithm and resource allocation graphs.", isExamMode: true },
+                          { title: "CPU Scheduling Algorithms", subject: "Operating Systems", topic: "CPU Scheduling", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comparison of FCFS, SJF, and Round Robin scheduling.", isExamMode: true },
+                          { title: "Distance Vector Routing", subject: "Computer Networks", topic: "Routing Algorithms", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Explanation of RIP and Bellman-Ford algorithm.", isExamMode: false },
+                          { title: "Database Normalization Guide", subject: "Database Management Systems", topic: "Normalization", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Step-by-step 1NF, 2NF, 3NF and BCNF normalization.", isExamMode: true },
+                          { title: "OSI 7 Layers Overview", subject: "Computer Networks", topic: "OSI Model", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Visual guide to the OSI reference model layers.", isExamMode: true },
+                          { title: "TCP vs UDP Comparison", subject: "Computer Networks", topic: "TCP vs UDP", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Analysis of connection-oriented vs connectionless protocols.", isExamMode: false },
+                          { title: "Agile Development Lifecycle", subject: "Software Engineering", topic: "Agile", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Introduction to Scrum, Sprints, and Kanban.", isExamMode: true },
+                          { title: "Stack Implementation & Apps", subject: "Data Structures", topic: "Stacks", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Using stacks for expression evaluation and recursion.", isExamMode: false },
+                          { title: "Paging and Segmentation", subject: "Operating Systems", topic: "Memory Management", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Virtual memory concepts and page table structures.", isExamMode: true },
+                          { title: "Entity Relationship Modeling", subject: "Database Management Systems", topic: "ER Diagrams", type: "PPT", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Designing database schemas using ER diagrams.", isExamMode: true },
+                          { title: "Software Testing Techniques", subject: "Software Engineering", topic: "Testing", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Black-box vs White-box testing strategies.", isExamMode: false },
+                          { title: "IPv4 vs IPv6 Addressing", subject: "Computer Networks", topic: "IP Addressing", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Comparison of network addressing formats and headers.", isExamMode: false },
+                          { title: "Sorting Algorithms Comparison", subject: "Data Structures", topic: "Sorting", type: "PDF", file_url: "https://www.w3.org/WAI/ER/tests/xhtml/testfiles/resources/pdf/dummy.pdf", description: "Time complexity analysis of QuickSort, MergeSort, and HeapSort.", isExamMode: true }
                         ];
                         const path = 'resources';
                         try {

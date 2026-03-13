@@ -43,7 +43,10 @@ service cloud.firestore {
              data.type in ['PDF', 'PPT', 'Question Paper'] &&
              data.file_url is string && data.file_url.matches("^https?://.*") &&
              (!('description' in data) || (data.description is string && data.description.size() <= 500)) &&
-             data.uploaded_by == request.auth.uid;
+             (!('rating' in data) || (data.rating is number && data.rating >= 0 && data.rating <= 5)) &&
+             (!('isExamMode' in data) || (data.isExamMode is bool)) &&
+             data.uploaded_by == request.auth.uid &&
+             data.createdAt is timestamp;
     }
 
     match /users/{userId} {
